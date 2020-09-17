@@ -10,7 +10,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/containous/yaegi/extract"
+	"github.com/traefik/yaegi/extract"
 )
 
 func extractCmd(arg []string) error {
@@ -58,7 +58,7 @@ func extractCmd(arg []string) error {
 			continue
 		}
 
-		oFile := strings.Replace(importPath, "/", "_", -1) + ".go"
+		oFile := strings.ReplaceAll(importPath, "/", "_") + ".go"
 		f, err := os.Create(oFile)
 		if err != nil {
 			return err

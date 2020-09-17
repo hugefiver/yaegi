@@ -1,6 +1,7 @@
 package interp_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -17,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containous/yaegi/interp"
-	"github.com/containous/yaegi/stdlib"
+	"github.com/traefik/yaegi/interp"
+	"github.com/traefik/yaegi/stdlib"
 )
 
 func init() { log.SetFlags(log.Lshortfile) }
@@ -99,7 +100,39 @@ func TestEvalBuiltin(t *testing.T) {
 		{src: `c := []int{1}; d := []int{2, 3}; c = append(c, d...); c`, res: "[1 2 3]"},
 		{src: `string(append([]byte("hello "), "world"...))`, res: "hello world"},
 		{src: `e := "world"; string(append([]byte("hello "), e...))`, res: "hello world"},
+		{src: `b := []int{1}; b = append(1, 2, 3); b`, err: "1:54: first argument to append must be slice; have int"},
+		{src: `g := len(a)`, res: "1"},
+		{src: `g := cap(a)`, res: "1"},
+		{src: `g := len("test")`, res: "4"},
+		{src: `g := len(map[string]string{"a": "b"})`, res: "1"},
+		{src: `a := len()`, err: "not enough arguments in call to len"},
+		{src: `a := len([]int, 0)`, err: "too many arguments for len"},
+		{src: `g := cap("test")`, err: "1:37: invalid argument for cap"},
+		{src: `g := cap(map[string]string{"a": "b"})`, err: "1:37: invalid argument for cap"},
+		{src: `h := make(chan int, 1); close(h); len(h)`, res: "0"},
+		{src: `close(a)`, err: "1:34: invalid operation: non-chan type []int"},
+		{src: `h := make(chan int, 1); var i <-chan int = h; close(i)`, err: "1:80: invalid operation: cannot close receive-only channel"},
+		{src: `j := make([]int, 2)`, res: "[0 0]"},
+		{src: `j := make([]int, 2, 3)`, res: "[0 0]"},
+		{src: `j := make(int)`, err: "1:38: cannot make int; type must be slice, map, or channel"},
+		{src: `j := make([]int)`, err: "1:33: not enough arguments in call to make"},
+		{src: `j := make([]int, 0, 1, 2)`, err: "1:33: too many arguments for make"},
+		{src: `j := make([]int, 2, 1)`, err: "1:33: len larger than cap in make"},
+		{src: `j := make([]int, "test")`, err: "1:45: cannot convert \"test\" to int"},
+		{src: `k := []int{3, 4}; copy(k, []int{1,2}); k`, res: "[1 2]"},
 		{src: `f := []byte("Hello"); copy(f, "world"); string(f)`, res: "world"},
+		{src: `copy(g, g)`, err: "1:28: copy expects slice arguments"},
+		{src: `copy(a, "world")`, err: "1:28: arguments to copy have different element types []int and string"},
+		{src: `l := map[string]int{"a": 1, "b": 2}; delete(l, "a"); l`, res: "map[b:2]"},
+		{src: `delete(a, 1)`, err: "1:35: first argument to delete must be map; have []int"},
+		{src: `l := map[string]int{"a": 1, "b": 2}; delete(l, 1)`, err: "1:75: cannot use int as type string in delete"},
+		{src: `a := []int{1,2}; println(a...)`, err: "invalid use of ... with builtin println"},
+		{src: `m := complex(3, 2); real(m)`, res: "3"},
+		{src: `m := complex(3, 2); imag(m)`, res: "2"},
+		{src: `m := complex("test", 2)`, err: "1:33: invalid types string and int"},
+		{src: `imag("test")`, err: "1:33: cannot convert \"test\" to complex128"},
+		{src: `imag(a)`, err: "1:33: invalid argument type []int for imag"},
+		{src: `real(a)`, err: "1:33: invalid argument type []int for real"},
 	})
 }
 
@@ -132,6 +165,20 @@ func TestEvalImport(t *testing.T) {
 	runTests(t, i, []testCase{
 		{pre: func() { eval(t, i, `import "time"`) }, src: "2 * time.Second", res: "2s"},
 	})
+}
+
+func TestEvalStdout(t *testing.T) {
+	var out, err bytes.Buffer
+	i := interp.New(interp.Options{Stdout: &out, Stderr: &err})
+	i.Use(stdlib.Symbols)
+	_, e := i.Eval(`import "fmt"; func main() { fmt.Println("hello") }`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	wanted := "hello\n"
+	if res := out.String(); res != wanted {
+		t.Fatalf("got %v, want %v", res, wanted)
+	}
 }
 
 func TestEvalNil(t *testing.T) {
@@ -326,6 +373,7 @@ func TestEvalComparison(t *testing.T) {
 
 func TestEvalCompositeArray(t *testing.T) {
 	i := interp.New(interp.Options{})
+	eval(t, i, `const l = 10`)
 	runTests(t, i, []testCase{
 		{src: "a := []int{1, 2, 7: 20, 30}", res: "[1 2 0 0 0 0 0 20 30]"},
 		{src: `a := []int{1, 1.2}`, err: "1:42: 6/5 truncated to int"},
@@ -333,6 +381,8 @@ func TestEvalCompositeArray(t *testing.T) {
 		{src: `a := []int{1.1:1, 1.2:"test"}`, err: "1:39: index float64 must be integer constant"},
 		{src: `a := [2]int{1, 1.2}`, err: "1:43: 6/5 truncated to int"},
 		{src: `a := [1]int{1, 2}`, err: "1:43: index 1 is out of bounds (>= 1)"},
+		{src: `b := [l]int{1, 2}`, res: "[1 2 0 0 0 0 0 0 0 0]"},
+		{src: `i := 10; a := [i]int{1, 2}`, err: "1:43: non-constant array bound \"i\""},
 	})
 }
 
@@ -790,7 +840,7 @@ func TestMultiEvalNoName(t *testing.T) {
 		_, err = i.Eval(string(data))
 		if k == 1 {
 			expectedErr := fmt.Errorf("3:8: fmt/%s redeclared in this block", interp.DefaultSourceName)
-			if err.Error() != expectedErr.Error() {
+			if err == nil || err.Error() != expectedErr.Error() {
 				t.Fatalf("unexpected result; wanted error %v, got %v", expectedErr, err)
 			}
 			return
@@ -868,12 +918,251 @@ func TestImportPathIsKey(t *testing.T) {
 	}
 }
 
+// The code in hello1.go and hello2.go spawns a "long-running" goroutine, which
+// means each call to EvalPath actually terminates before the evaled code is done
+// running. So this test demonstrates:
+// 1) That two sequential calls to EvalPath don't see their "compilation phases"
+// collide (no data race on the fields of the interpreter), which is somewhat
+// obvious since the calls (and hence the "compilation phases") are sequential too.
+// 2) That two concurrent goroutine runs spawned by the same interpreter do not
+// collide either.
+func TestConcurrentEvals(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	pin, pout := io.Pipe()
+	defer func() {
+		_ = pin.Close()
+		_ = pout.Close()
+	}()
+	interpr := interp.New(interp.Options{Stdout: pout})
+	interpr.Use(stdlib.Symbols)
+
+	if _, err := interpr.EvalPath("testdata/concurrent/hello1.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := interpr.EvalPath("testdata/concurrent/hello2.go"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := make(chan error)
+	go func() {
+		hello1, hello2 := false, false
+		sc := bufio.NewScanner(pin)
+		for sc.Scan() {
+			l := sc.Text()
+			switch l {
+			case "hello world1":
+				hello1 = true
+			case "hello world2":
+				hello2 = true
+			default:
+				c <- fmt.Errorf("unexpected output: %v", l)
+				return
+			}
+			if hello1 && hello2 {
+				break
+			}
+		}
+		c <- nil
+	}()
+
+	timeout := time.NewTimer(5 * time.Second)
+	select {
+	case <-timeout.C:
+		t.Fatal("timeout")
+	case err := <-c:
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestConcurrentEvals2 shows that even though EvalWithContext calls Eval in a
+// goroutine, it indeed waits for Eval to terminate, and that therefore the code
+// called by EvalWithContext is sequential. And that there is no data race for the
+// interp package global vars or the interpreter fields in this case.
+func TestConcurrentEvals2(t *testing.T) {
+	pin, pout := io.Pipe()
+	defer func() {
+		_ = pin.Close()
+		_ = pout.Close()
+	}()
+	interpr := interp.New(interp.Options{Stdout: pout})
+	interpr.Use(stdlib.Symbols)
+
+	done := make(chan error)
+	go func() {
+		hello1 := false
+		sc := bufio.NewScanner(pin)
+		for sc.Scan() {
+			l := sc.Text()
+			if hello1 {
+				if l == "hello world2" {
+					break
+				} else {
+					done <- fmt.Errorf("unexpected output: %v", l)
+					return
+				}
+			}
+			if l == "hello world1" {
+				hello1 = true
+			} else {
+				done <- fmt.Errorf("unexpected output: %v", l)
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	ctx := context.Background()
+	if _, err := interpr.EvalWithContext(ctx, `import "time"`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := interpr.EvalWithContext(ctx, `time.Sleep(time.Second); println("hello world1")`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := interpr.EvalWithContext(ctx, `time.Sleep(time.Second); println("hello world2")`); err != nil {
+		t.Fatal(err)
+	}
+
+	timeout := time.NewTimer(5 * time.Second)
+	select {
+	case <-timeout.C:
+		t.Fatal("timeout")
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestConcurrentEvals3 makes sure that we don't regress into data races at the package level, i.e from:
+// - global vars, which should obviously not be mutated.
+// - when calling Interpreter.Use, the symbols given as argument should be
+// copied when being inserted into interp.binPkg, and not directly used as-is.
+func TestConcurrentEvals3(t *testing.T) {
+	allDone := make(chan bool)
+	runREPL := func() {
+		done := make(chan error)
+		pinin, poutin := io.Pipe()
+		pinout, poutout := io.Pipe()
+		i := interp.New(interp.Options{Stdin: pinin, Stdout: poutout})
+		i.Use(stdlib.Symbols)
+
+		go func() {
+			_, _ = i.REPL()
+		}()
+
+		input := []string{
+			`hello one`,
+			`hello two`,
+			`hello three`,
+		}
+
+		go func() {
+			sc := bufio.NewScanner(pinout)
+			k := 0
+			for sc.Scan() {
+				l := sc.Text()
+				if l != input[k] {
+					done <- fmt.Errorf("unexpected output, want %q, got %q", input[k], l)
+					return
+				}
+				k++
+				if k > 2 {
+					break
+				}
+			}
+			done <- nil
+		}()
+
+		for _, v := range input {
+			in := strings.NewReader(fmt.Sprintf("println(\"%s\")\n", v))
+			if _, err := io.Copy(poutin, in); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(time.Second)
+		}
+
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		_ = pinin.Close()
+		_ = poutin.Close()
+		_ = pinout.Close()
+		_ = poutout.Close()
+		allDone <- true
+	}
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			runREPL()
+		}()
+	}
+
+	timeout := time.NewTimer(10 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-allDone:
+		case <-timeout.C:
+			t.Fatal("timeout")
+		}
+	}
+}
+
+func TestConcurrentComposite1(t *testing.T) {
+	testConcurrentComposite(t, "./testdata/concurrent/composite/composite_lit.go")
+}
+
+func TestConcurrentComposite2(t *testing.T) {
+	testConcurrentComposite(t, "./testdata/concurrent/composite/composite_sparse.go")
+}
+
+func testConcurrentComposite(t *testing.T, filePath string) {
+	pin, pout := io.Pipe()
+	i := interp.New(interp.Options{Stdout: pout})
+	i.Use(stdlib.Symbols)
+
+	errc := make(chan error)
+	var output string
+	go func() {
+		sc := bufio.NewScanner(pin)
+		k := 0
+		for sc.Scan() {
+			output += sc.Text()
+			k++
+			if k > 1 {
+				break
+			}
+		}
+		errc <- nil
+	}()
+
+	if _, err := i.EvalPath(filePath); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = pin.Close()
+	_ = pout.Close()
+
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "{hello}{hello}"
+	if output != expected {
+		t.Fatalf("unexpected output, want %q, got %q", expected, output)
+	}
+}
+
 func TestEvalScanner(t *testing.T) {
-	tests := []struct {
+	type testCase struct {
 		desc      string
 		src       []string
 		errorLine int
-	}{
+	}
+	tests := []testCase{
 		{
 			desc: "no error",
 			src: []string{
@@ -883,6 +1172,7 @@ func TestEvalScanner(t *testing.T) {
 			},
 			errorLine: -1,
 		},
+
 		{
 			desc: "no parsing error, but block error",
 			src: []string{
@@ -910,6 +1200,7 @@ func TestEvalScanner(t *testing.T) {
 			},
 			errorLine: -1,
 		},
+
 		{
 			desc: "multi-line comma operand",
 			src: []string{
@@ -926,13 +1217,40 @@ func TestEvalScanner(t *testing.T) {
 			},
 			errorLine: -1,
 		},
+		{
+			desc: "anonymous func call with no assignment",
+			src: []string{
+				`func() { println(3) }()`,
+			},
+			errorLine: -1,
+		},
+		{
+			// to make sure that special handling of the above anonymous, does not break this general case.
+			desc: "just func",
+			src: []string{
+				`func foo() { println(3) }`,
+			},
+			errorLine: -1,
+		},
+		{
+			// to make sure that special handling of the above anonymous, does not break this general case.
+			desc: "just method",
+			src: []string{
+				`type bar string`,
+				`func (b bar) foo() { println(3) }`,
+			},
+			errorLine: -1,
+		},
 	}
 
-	for it, test := range tests {
-		i := interp.New(interp.Options{})
+	runREPL := func(t *testing.T, test testCase) {
+		// TODO(mpl): use a pipe for the output as well, just as in TestConcurrentEvals5
+		var stdout bytes.Buffer
+		safeStdout := &safeBuffer{buf: &stdout}
 		var stderr bytes.Buffer
 		safeStderr := &safeBuffer{buf: &stderr}
 		pin, pout := io.Pipe()
+		i := interp.New(interp.Options{Stdin: pin, Stdout: safeStdout, Stderr: safeStderr})
 		defer func() {
 			// Closing the pipe also takes care of making i.REPL terminate,
 			// hence freeing its goroutine.
@@ -941,7 +1259,7 @@ func TestEvalScanner(t *testing.T) {
 		}()
 
 		go func() {
-			i.REPL(pin, safeStderr)
+			_, _ = i.REPL()
 		}()
 		for k, v := range test.src {
 			if _, err := pout.Write([]byte(v + "\n")); err != nil {
@@ -952,14 +1270,18 @@ func TestEvalScanner(t *testing.T) {
 			errMsg := safeStderr.String()
 			if k == test.errorLine {
 				if errMsg == "" {
-					t.Fatalf("%d: statement %q should have produced an error", it, v)
+					t.Fatalf("test %q: statement %q should have produced an error", test.desc, v)
 				}
 				break
 			}
 			if errMsg != "" {
-				t.Fatalf("%d: unexpected error: %v", it, errMsg)
+				t.Fatalf("test %q: unexpected error: %v", test.desc, errMsg)
 			}
 		}
+	}
+
+	for _, test := range tests {
+		runREPL(t, test)
 	}
 }
 

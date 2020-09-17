@@ -9,7 +9,7 @@ import "reflect"
 var Symbols = map[string]map[string]reflect.Value{}
 
 func init() {
-	Symbols["github.com/containous/yaegi/stdlib"] = map[string]reflect.Value{
+	Symbols["github.com/traefik/yaegi/stdlib"] = map[string]reflect.Value{
 		"Symbols": reflect.ValueOf(Symbols),
 	}
 }
@@ -47,5 +47,6 @@ func init() {
 //go:generate ../cmd/goexports/goexports path path/filepath reflect regexp regexp/syntax
 //go:generate ../cmd/goexports/goexports runtime runtime/debug runtime/pprof runtime/trace
 //go:generate ../cmd/goexports/goexports sort strconv strings sync sync/atomic
+//go:generate ../cmd/goexports/goexports testing testing/iotest testing/quick
 //go:generate ../cmd/goexports/goexports text/scanner text/tabwriter text/template text/template/parse
 //go:generate ../cmd/goexports/goexports time unicode unicode/utf16 unicode/utf8

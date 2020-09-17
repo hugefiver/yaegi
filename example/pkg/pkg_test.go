@@ -3,13 +3,12 @@ package pkg
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/containous/yaegi/interp"
-	"github.com/containous/yaegi/stdlib"
+	"github.com/traefik/yaegi/interp"
+	"github.com/traefik/yaegi/stdlib"
 )
 
 func TestPackages(t *testing.T) {
@@ -104,39 +103,16 @@ func TestPackages(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Init go interpreter
-			i := interp.New(interp.Options{GoPath: goPath})
+			var stdout, stderr bytes.Buffer
+			i := interp.New(interp.Options{GoPath: goPath, Stdout: &stdout, Stderr: &stderr})
 			i.Use(stdlib.Symbols) // Use binary standard library
 
 			var msg string
 			if test.evalFile != "" {
-				// TODO(mpl): this is brittle if we do concurrent tests and stuff, do better later.
-				stdout := os.Stdout
-				defer func() { os.Stdout = stdout }()
-				pr, pw, err := os.Pipe()
-				if err != nil {
-					t.Fatal(err)
-				}
-				os.Stdout = pw
-
 				if _, err := i.EvalPath(test.evalFile); err != nil {
 					fatalStderrf(t, "%v", err)
 				}
-
-				var buf bytes.Buffer
-				errC := make(chan error)
-				go func() {
-					_, err := io.Copy(&buf, pr)
-					errC <- err
-				}()
-
-				if err := pw.Close(); err != nil {
-					fatalStderrf(t, "%v", err)
-				}
-				if err := <-errC; err != nil {
-					fatalStderrf(t, "%v", err)
-				}
-				msg = buf.String()
+				msg = stdout.String()
 			} else {
 				// Load pkg from sources
 				topImport := "github.com/foo/pkg"

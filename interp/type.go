@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"sync"
 )
 
 // tcat defines interpreter type categories.
@@ -104,6 +105,7 @@ type structField struct {
 
 // itype defines the internal representation of types in the interpreter.
 type itype struct {
+	mu          *sync.Mutex
 	cat         tcat          // Type category
 	field       []structField // Array of struct fields if structT or interfaceT
 	key         *itype        // Type of key element if MapT or nil
@@ -125,14 +127,12 @@ type itype struct {
 	scope       *scope        // type declaration scope (in case of re-parse incomplete type)
 }
 
-var (
-	untypedBool    = &itype{cat: boolT, name: "bool", untyped: true}
-	untypedString  = &itype{cat: stringT, name: "string", untyped: true}
-	untypedRune    = &itype{cat: int32T, name: "int32", untyped: true}
-	untypedInt     = &itype{cat: intT, name: "int", untyped: true}
-	untypedFloat   = &itype{cat: float64T, name: "float64", untyped: true}
-	untypedComplex = &itype{cat: complex128T, name: "complex128", untyped: true}
-)
+func untypedBool() *itype    { return &itype{cat: boolT, name: "bool", untyped: true} }
+func untypedString() *itype  { return &itype{cat: stringT, name: "string", untyped: true} }
+func untypedRune() *itype    { return &itype{cat: int32T, name: "int32", untyped: true} }
+func untypedInt() *itype     { return &itype{cat: intT, name: "int", untyped: true} }
+func untypedFloat() *itype   { return &itype{cat: float64T, name: "float64", untyped: true} }
+func untypedComplex() *itype { return &itype{cat: complex128T, name: "complex128", untyped: true} }
 
 // nodeType returns a type definition for the corresponding AST subtree.
 func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
@@ -182,6 +182,9 @@ func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
 				t.size = arrayTypeLen(n.anc)
 			default:
 				if sym, _, ok := sc.lookup(n.child[0].ident); ok {
+					if sym.kind != constSym {
+						return nil, n.child[0].cfgErrorf("non-constant array bound %q", n.child[0].ident)
+					}
 					// Resolve symbol to get size value
 					if sym.typ != nil && sym.typ.cat == intT {
 						if v, ok := sym.rval.Interface().(int); ok {
@@ -218,24 +221,24 @@ func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
 		switch v := n.rval.Interface().(type) {
 		case bool:
 			n.rval = reflect.ValueOf(constant.MakeBool(v))
-			t = untypedBool
+			t = untypedBool()
 		case rune:
 			// It is impossible to work out rune const literals in AST
 			// with the correct type so we must make the const type here.
 			n.rval = reflect.ValueOf(constant.MakeInt64(int64(v)))
-			t = untypedRune
+			t = untypedRune()
 		case constant.Value:
 			switch v.Kind() {
 			case constant.Bool:
-				t = untypedBool
+				t = untypedBool()
 			case constant.String:
-				t = untypedString
+				t = untypedString()
 			case constant.Int:
-				t = untypedInt
+				t = untypedInt()
 			case constant.Float:
-				t = untypedFloat
+				t = untypedFloat()
 			case constant.Complex:
-				t = untypedComplex
+				t = untypedComplex()
 			default:
 				err = n.cfgErrorf("missing support for type %v", n.rval)
 			}
@@ -279,7 +282,7 @@ func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
 			// Builtin types are special and may depend from their input arguments.
 			t.cat = builtinT
 			switch n.child[0].ident {
-			case "complex":
+			case bltnComplex:
 				var nt0, nt1 *itype
 				if nt0, err = nodeType(interp, sc, n.child[1]); err != nil {
 					return nil, err
@@ -296,7 +299,7 @@ func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
 					case isFloat64(t0) && isFloat64(t1):
 						t = sc.getType("complex128")
 					case nt0.untyped && isNumber(t0) && nt1.untyped && isNumber(t1):
-						t = &itype{cat: valueT, rtype: complexType, scope: sc}
+						t = untypedComplex()
 					case nt0.untyped && isFloat32(t1) || nt1.untyped && isFloat32(t0):
 						t = sc.getType("complex64")
 					case nt0.untyped && isFloat64(t1) || nt1.untyped && isFloat64(t0):
@@ -308,7 +311,7 @@ func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
 						t.untyped = true
 					}
 				}
-			case "real", "imag":
+			case bltnReal, bltnImag:
 				if t, err = nodeType(interp, sc, n.child[1]); err != nil {
 					return nil, err
 				}
@@ -324,14 +327,14 @@ func nodeType(interp *Interpreter, sc *scope, n *node) (*itype, error) {
 						err = n.cfgErrorf("invalid complex type %s", k)
 					}
 				}
-			case "cap", "copy", "len":
+			case bltnCap, bltnCopy, bltnLen:
 				t = sc.getType("int")
-			case "append", "make":
+			case bltnAppend, bltnMake:
 				t, err = nodeType(interp, sc, n.child[1])
-			case "new":
+			case bltnNew:
 				t, err = nodeType(interp, sc, n.child[1])
 				t = &itype{cat: ptrT, val: t, incomplete: t.incomplete, scope: sc}
-			case "recover":
+			case bltnRecover:
 				t = sc.getType("interface{}")
 			}
 			if err != nil {
@@ -1243,20 +1246,18 @@ func (t *itype) lookupBinMethod(name string) (m reflect.Method, index []int, isP
 	if t.cat == ptrT {
 		return t.val.lookupBinMethod(name)
 	}
+	for i, f := range t.field {
+		if f.embed {
+			if m2, index2, isPtr2, ok2 := f.typ.lookupBinMethod(name); ok2 {
+				index = append([]int{i}, index2...)
+				return m2, index, isPtr2, ok2
+			}
+		}
+	}
 	m, ok = t.TypeOf().MethodByName(name)
 	if !ok {
 		m, ok = reflect.PtrTo(t.TypeOf()).MethodByName(name)
 		isPtr = ok
-	}
-	if !ok {
-		for i, f := range t.field {
-			if f.embed {
-				if m2, index2, isPtr2, ok2 := f.typ.lookupBinMethod(name); ok2 {
-					index = append([]int{i}, index2...)
-					return m2, index, isPtr2, ok2
-				}
-			}
-		}
 	}
 	return m, index, isPtr, ok
 }
@@ -1299,6 +1300,7 @@ func exportName(s string) string {
 }
 
 var (
+	// TODO(mpl): generators.
 	interf   = reflect.TypeOf((*interface{})(nil)).Elem()
 	constVal = reflect.TypeOf((*constant.Value)(nil)).Elem()
 )

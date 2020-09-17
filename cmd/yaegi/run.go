@@ -8,11 +8,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containous/yaegi/interp"
-	"github.com/containous/yaegi/stdlib"
-	"github.com/containous/yaegi/stdlib/syscall"
-	"github.com/containous/yaegi/stdlib/unrestricted"
-	"github.com/containous/yaegi/stdlib/unsafe"
+	"github.com/traefik/yaegi/interp"
+	"github.com/traefik/yaegi/stdlib"
+	"github.com/traefik/yaegi/stdlib/syscall"
+	"github.com/traefik/yaegi/stdlib/unrestricted"
+	"github.com/traefik/yaegi/stdlib/unsafe"
 )
 
 func run(arg []string) error {
@@ -56,14 +56,16 @@ func run(arg []string) error {
 	}
 
 	if cmd != "" {
-		i.REPL(strings.NewReader(cmd), os.Stderr)
+		_, err = i.Eval(cmd)
+		showError(err)
 	}
 
 	if len(args) == 0 {
 		if interactive || cmd == "" {
-			i.REPL(os.Stdin, os.Stdout)
+			_, err = i.REPL()
+			showError(err)
 		}
-		return nil
+		return err
 	}
 
 	// Skip first os arg to set command line as expected by interpreted main
@@ -71,40 +73,27 @@ func run(arg []string) error {
 	os.Args = arg[1:]
 	flag.CommandLine = flag.NewFlagSet(path, flag.ExitOnError)
 
-	if isPackageName(path) {
-		err = runPackage(i, path)
+	if isFile(path) {
+		err = runFile(i, path)
 	} else {
-		if isDir(path) {
-			err = runDir(i, path)
-		} else {
-			err = runFile(i, path)
-		}
+		_, err = i.EvalPath(path)
 	}
+	showError(err)
+
 	if err != nil {
 		return err
 	}
 
 	if interactive {
-		i.REPL(os.Stdin, os.Stdout)
+		_, err = i.REPL()
+		showError(err)
 	}
-	return nil
+	return err
 }
 
-func isPackageName(path string) bool {
-	return !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "./") && !strings.HasPrefix(path, "../") && !strings.HasSuffix(path, ".go")
-}
-
-func isDir(path string) bool {
-	fi, err := os.Lstat(path)
-	return err == nil && fi.IsDir()
-}
-
-func runPackage(i *interp.Interpreter, path string) error {
-	return fmt.Errorf("runPackage not implemented")
-}
-
-func runDir(i *interp.Interpreter, path string) error {
-	return fmt.Errorf("runDir not implemented")
+func isFile(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 func runFile(i *interp.Interpreter, path string) error {
@@ -116,16 +105,21 @@ func runFile(i *interp.Interpreter, path string) error {
 	if s := string(b); strings.HasPrefix(s, "#!") {
 		// Allow executable go scripts, Have the same behavior as in interactive mode.
 		s = strings.Replace(s, "#!", "//", 1)
-		i.REPL(strings.NewReader(s), os.Stdout)
-	} else {
-		// Files not starting with "#!" are supposed to be pure Go, directly Evaled.
-		_, err := i.EvalPath(path)
-		if err != nil {
-			fmt.Println(err)
-			if p, ok := err.(interp.Panic); ok {
-				fmt.Println(string(p.Stack))
-			}
-		}
+		_, err = i.Eval(s)
+		return err
 	}
-	return nil
+
+	// Files not starting with "#!" are supposed to be pure Go, directly Evaled.
+	_, err = i.EvalPath(path)
+	return err
+}
+
+func showError(err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintln(os.Stderr, err)
+	if p, ok := err.(interp.Panic); ok {
+		fmt.Fprintln(os.Stderr, string(p.Stack))
+	}
 }

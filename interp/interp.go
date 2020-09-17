@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"go/build"
 	"go/scanner"
 	"go/token"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/signal"
 	"reflect"
@@ -115,6 +117,9 @@ type opt struct {
 	noRun    bool          // compile, but do not run
 	fastChan bool          // disable cancellable chan operations
 	context  build.Context // build context: GOPATH, build constraints
+	stdin    io.Reader     // standard input
+	stdout   io.Writer     // standard output
+	stderr   io.Writer     // standard error
 }
 
 // Interpreter contains global resources and state.
@@ -125,11 +130,15 @@ type Interpreter struct {
 	// architectures.
 	id uint64
 
+	// nindex is a node number incremented for each new node.
+	// It is used for debug (AST and CFG graphs). As it is atomically
+	// incremented, keep it aligned on 64 bits boundary.
+	nindex int64
+
 	name string // name of the input source file (or main)
 
 	opt                        // user settable options
 	cancelChan bool            // enables cancellable chan operations
-	nindex     int64           // next node index
 	fset       *token.FileSet  // fileset to locate node in source code
 	binPkg     Exports         // binary packages used in interpreter, indexed by path
 	rdir       map[string]bool // for src import cycle detection
@@ -147,11 +156,16 @@ type Interpreter struct {
 
 const (
 	mainID   = "main"
-	selfPath = "github.com/containous/yaegi/interp"
+	selfPath = "github.com/traefik/yaegi/interp"
 	// DefaultSourceName is the name used by default when the name of the input
 	// source file has not been specified for an Eval.
 	// TODO(mpl): something even more special as a name?
 	DefaultSourceName = "_.go"
+
+	// Test is the value to pass to EvalPath to activate evaluation of test functions.
+	Test = false
+	// NoTest is the value to pass to EvalPath to skip evaluation of test functions.
+	NoTest = true
 )
 
 // Symbols exposes interpreter values.
@@ -207,10 +221,16 @@ func (n *node) Walk(in func(n *node) bool, out func(n *node)) {
 
 // Options are the interpreter options.
 type Options struct {
-	// GoPath sets GOPATH for the interpreter
+	// GoPath sets GOPATH for the interpreter.
 	GoPath string
-	// BuildTags sets build constraints for the interpreter
+
+	// BuildTags sets build constraints for the interpreter.
 	BuildTags []string
+
+	// Standard input, output and error streams.
+	// They default to os.Stding, os.Stdout and os.Stderr respectively.
+	Stdin          io.Reader
+	Stdout, Stderr io.Writer
 }
 
 // New returns a new interpreter.
@@ -226,6 +246,18 @@ func New(options Options) *Interpreter {
 		pkgNames: map[string]string{},
 		rdir:     map[string]bool{},
 		hooks:    &hooks{},
+	}
+
+	if i.opt.stdin = options.Stdin; i.opt.stdin == nil {
+		i.opt.stdin = os.Stdin
+	}
+
+	if i.opt.stdout = options.Stdout; i.opt.stdout == nil {
+		i.opt.stdout = os.Stdout
+	}
+
+	if i.opt.stderr = options.Stderr; i.opt.stderr == nil {
+		i.opt.stderr = os.Stderr
 	}
 
 	i.opt.context.GOPATH = options.GoPath
@@ -251,6 +283,24 @@ func New(options Options) *Interpreter {
 	i.opt.fastChan, _ = strconv.ParseBool(os.Getenv("YAEGI_FAST_CHAN"))
 	return &i
 }
+
+const (
+	bltnAppend  = "append"
+	bltnCap     = "cap"
+	bltnClose   = "close"
+	bltnComplex = "complex"
+	bltnImag    = "imag"
+	bltnCopy    = "copy"
+	bltnDelete  = "delete"
+	bltnLen     = "len"
+	bltnMake    = "make"
+	bltnNew     = "new"
+	bltnPanic   = "panic"
+	bltnPrint   = "print"
+	bltnPrintln = "println"
+	bltnReal    = "real"
+	bltnRecover = "recover"
+)
 
 func initUniverse() *scope {
 	sc := &scope{global: true, sym: map[string]*symbol{
@@ -278,29 +328,29 @@ func initUniverse() *scope {
 		"uintptr":     {kind: typeSym, typ: &itype{cat: uintptrT, name: "uintptr"}},
 
 		// predefined Go constants
-		"false": {kind: constSym, typ: untypedBool, rval: reflect.ValueOf(false)},
-		"true":  {kind: constSym, typ: untypedBool, rval: reflect.ValueOf(true)},
-		"iota":  {kind: constSym, typ: untypedInt},
+		"false": {kind: constSym, typ: untypedBool(), rval: reflect.ValueOf(false)},
+		"true":  {kind: constSym, typ: untypedBool(), rval: reflect.ValueOf(true)},
+		"iota":  {kind: constSym, typ: untypedInt()},
 
 		// predefined Go zero value
 		"nil": {typ: &itype{cat: nilT, untyped: true}},
 
 		// predefined Go builtins
-		"append":  {kind: bltnSym, builtin: _append},
-		"cap":     {kind: bltnSym, builtin: _cap},
-		"close":   {kind: bltnSym, builtin: _close},
-		"complex": {kind: bltnSym, builtin: _complex},
-		"imag":    {kind: bltnSym, builtin: _imag},
-		"copy":    {kind: bltnSym, builtin: _copy},
-		"delete":  {kind: bltnSym, builtin: _delete},
-		"len":     {kind: bltnSym, builtin: _len},
-		"make":    {kind: bltnSym, builtin: _make},
-		"new":     {kind: bltnSym, builtin: _new},
-		"panic":   {kind: bltnSym, builtin: _panic},
-		"print":   {kind: bltnSym, builtin: _print},
-		"println": {kind: bltnSym, builtin: _println},
-		"real":    {kind: bltnSym, builtin: _real},
-		"recover": {kind: bltnSym, builtin: _recover},
+		bltnAppend:  {kind: bltnSym, builtin: _append},
+		bltnCap:     {kind: bltnSym, builtin: _cap},
+		bltnClose:   {kind: bltnSym, builtin: _close},
+		bltnComplex: {kind: bltnSym, builtin: _complex},
+		bltnImag:    {kind: bltnSym, builtin: _imag},
+		bltnCopy:    {kind: bltnSym, builtin: _copy},
+		bltnDelete:  {kind: bltnSym, builtin: _delete},
+		bltnLen:     {kind: bltnSym, builtin: _len},
+		bltnMake:    {kind: bltnSym, builtin: _make},
+		bltnNew:     {kind: bltnSym, builtin: _new},
+		bltnPanic:   {kind: bltnSym, builtin: _panic},
+		bltnPrint:   {kind: bltnSym, builtin: _print},
+		bltnPrintln: {kind: bltnSym, builtin: _println},
+		bltnReal:    {kind: bltnSym, builtin: _real},
+		bltnRecover: {kind: bltnSym, builtin: _recover},
 	}}
 	return sc
 }
@@ -320,30 +370,69 @@ func (interp *Interpreter) resizeFrame() {
 	interp.frame.data = data
 }
 
-func (interp *Interpreter) main() *node {
-	interp.mutex.RLock()
-	defer interp.mutex.RUnlock()
-	if m, ok := interp.scopes[mainID]; ok && m.sym[mainID] != nil {
-		return m.sym[mainID].node
-	}
-	return nil
-}
-
 // Eval evaluates Go code represented as a string. Eval returns the last result
 // computed by the interpreter, and a non nil error in case of failure.
 func (interp *Interpreter) Eval(src string) (res reflect.Value, err error) {
 	return interp.eval(src, "", true)
 }
 
-// EvalPath evaluates Go code located at path. EvalPath returns the last result
-// computed by the interpreter, and a non nil error in case of failure.
+// EvalPath evaluates Go code located at path and returns the last result computed
+// by the interpreter, and a non nil error in case of failure.
+// The main function of the main package is executed if present.
 func (interp *Interpreter) EvalPath(path string) (res reflect.Value, err error) {
-	// TODO(marc): implement eval of a directory, package and tests.
+	if !isFile(path) {
+		_, err := interp.importSrc(mainID, path, NoTest)
+		return res, err
+	}
+
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
 		return res, err
 	}
 	return interp.eval(string(b), path, false)
+}
+
+// EvalTest evaluates Go code located at path, including test files with "_test.go" suffix.
+// A non nil error is returned in case of failure.
+// The main function, test functions and benchmark functions are internally compiled but not
+// executed. Test functions can be retrieved using the Symbol() method.
+func (interp *Interpreter) EvalTest(path string) error {
+	_, err := interp.importSrc(mainID, path, Test)
+	return err
+}
+
+// Symbols returns a map of interpreter exported symbol values for the given path.
+func (interp *Interpreter) Symbols(path string) map[string]reflect.Value {
+	m := map[string]reflect.Value{}
+
+	interp.mutex.RLock()
+	if interp.scopes[path] == nil {
+		interp.mutex.RUnlock()
+		return m
+	}
+	sym := interp.scopes[path].sym
+	interp.mutex.RUnlock()
+
+	for n, s := range sym {
+		if !canExport(n) {
+			// Skip private non-exported symbols.
+			continue
+		}
+		switch s.kind {
+		case constSym:
+			m[n] = s.rval
+		case funcSym:
+			m[n] = genFunctionWrapper(s.node)(interp.frame)
+		case varSym:
+			m[n] = interp.frame.data[s.index]
+		}
+	}
+	return m
+}
+
+func isFile(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 func (interp *Interpreter) eval(src, name string, inc bool) (res reflect.Value, err error) {
@@ -385,7 +474,7 @@ func (interp *Interpreter) eval(src, name string, inc bool) (res reflect.Value, 
 		return res, err
 	}
 
-	// Annotate AST with CFG infos
+	// Annotate AST with CFG informations.
 	initNodes, err := interp.cfg(root, pkgName)
 	if err != nil {
 		if interp.cfgDot {
@@ -398,24 +487,24 @@ func (interp *Interpreter) eval(src, name string, inc bool) (res reflect.Value, 
 		return res, err
 	}
 
-	// Add main to list of functions to run, after all inits
-	if m := interp.main(); m != nil {
-		initNodes = append(initNodes, m)
-	}
-
 	if root.kind != fileStmt {
-		// REPL may skip package statement
+		// REPL may skip package statement.
 		setExec(root.start)
 	}
 	interp.mutex.Lock()
+	gs := interp.scopes[pkgName]
 	if interp.universe.sym[pkgName] == nil {
-		// Make the package visible under a path identical to its name
-		// TODO(mpl): srcPkg is supposed to be keyed by importPath. Verify it is necessary, and implement.
-		interp.srcPkg[pkgName] = interp.scopes[pkgName].sym
+		// Make the package visible under a path identical to its name.
+		interp.srcPkg[pkgName] = gs.sym
 		interp.universe.sym[pkgName] = &symbol{kind: pkgSym, typ: &itype{cat: srcPkgT, path: pkgName}}
 		interp.pkgNames[pkgName] = pkgName
 	}
 	interp.mutex.Unlock()
+
+	// Add main to list of functions to run, after all inits.
+	if m := gs.sym[mainID]; pkgName == mainID && m != nil {
+		initNodes = append(initNodes, m.node)
+	}
 
 	if interp.cfgDot {
 		dotCmd := interp.dotCmd
@@ -429,21 +518,21 @@ func (interp *Interpreter) eval(src, name string, inc bool) (res reflect.Value, 
 		return res, err
 	}
 
-	// Generate node exec closures
+	// Generate node exec closures.
 	if err = genRun(root); err != nil {
 		return res, err
 	}
 
-	// Init interpreter execution memory frame
+	// Init interpreter execution memory frame.
 	interp.frame.setrunid(interp.runid())
 	interp.frame.mutex.Lock()
 	interp.resizeFrame()
 	interp.frame.mutex.Unlock()
 
-	// Execute node closures
+	// Execute node closures.
 	interp.run(root, nil)
 
-	// Wire and execute global vars
+	// Wire and execute global vars.
 	n, err := genGlobalVars([]*node{root}, interp.scopes[pkgName])
 	if err != nil {
 		return res, err
@@ -456,7 +545,7 @@ func (interp *Interpreter) eval(src, name string, inc bool) (res reflect.Value, 
 	v := genValue(root)
 	res = v(interp.frame)
 
-	// If result is an interpreter node, wrap it in a runtime callable function
+	// If result is an interpreter node, wrap it in a runtime callable function.
 	if res.IsValid() {
 		if n, ok := res.Interface().(*node); ok {
 			res = genFunctionWrapper(n)(interp.frame)
@@ -488,8 +577,8 @@ func (interp *Interpreter) EvalWithContext(ctx context.Context, src string) (ref
 		interp.stop()
 		return reflect.Value{}, ctx.Err()
 	case <-done:
-		return v, err
 	}
+	return v, err
 }
 
 // stop sends a semaphore to all running frames and closes the chan
@@ -520,13 +609,74 @@ func (interp *Interpreter) Use(values Exports) {
 		}
 
 		if interp.binPkg[k] == nil {
-			interp.binPkg[k] = v
-			continue
+			interp.binPkg[k] = make(map[string]reflect.Value)
 		}
 
 		for s, sym := range v {
 			interp.binPkg[k][s] = sym
 		}
+	}
+
+	// Checks if input values correspond to stdlib packages by looking for one
+	// well known stdlib package path.
+	if _, ok := values["fmt"]; ok {
+		fixStdio(interp)
+	}
+}
+
+// fixStdio redefines interpreter stdlib symbols to use the standard input,
+// output and errror assigned to the interpreter. The changes are limited to
+// the interpreter only. Global values os.Stdin, os.Stdout and os.Stderr are
+// not changed. Note that it is possible to escape the virtualized stdio by
+// read/write directly to file descriptors 0, 1, 2.
+func fixStdio(interp *Interpreter) {
+	p := interp.binPkg["fmt"]
+	if p == nil {
+		return
+	}
+
+	stdin, stdout, stderr := interp.stdin, interp.stdout, interp.stderr
+
+	p["Print"] = reflect.ValueOf(func(a ...interface{}) (n int, err error) { return fmt.Fprint(stdout, a...) })
+	p["Printf"] = reflect.ValueOf(func(f string, a ...interface{}) (n int, err error) { return fmt.Fprintf(stdout, f, a...) })
+	p["Println"] = reflect.ValueOf(func(a ...interface{}) (n int, err error) { return fmt.Fprintln(stdout, a...) })
+
+	p["Scan"] = reflect.ValueOf(func(a ...interface{}) (n int, err error) { return fmt.Fscan(stdin, a...) })
+	p["Scanf"] = reflect.ValueOf(func(f string, a ...interface{}) (n int, err error) { return fmt.Fscanf(stdin, f, a...) })
+	p["Scanln"] = reflect.ValueOf(func(a ...interface{}) (n int, err error) { return fmt.Fscanln(stdin, a...) })
+
+	if p = interp.binPkg["flag"]; p != nil {
+		c := flag.NewFlagSet(os.Args[0], flag.PanicOnError)
+		c.SetOutput(stderr)
+		p["CommandLine"] = reflect.ValueOf(&c).Elem()
+	}
+
+	if p = interp.binPkg["log"]; p != nil {
+		l := log.New(stderr, "", log.LstdFlags)
+		// Restrict Fatal symbols to panic instead of exit.
+		p["Fatal"] = reflect.ValueOf(l.Panic)
+		p["Fatalf"] = reflect.ValueOf(l.Panicf)
+		p["Fatalln"] = reflect.ValueOf(l.Panicln)
+
+		p["Flags"] = reflect.ValueOf(l.Flags)
+		p["Output"] = reflect.ValueOf(l.Output)
+		p["Panic"] = reflect.ValueOf(l.Panic)
+		p["Panicf"] = reflect.ValueOf(l.Panicf)
+		p["Panicln"] = reflect.ValueOf(l.Panicln)
+		p["Prefix"] = reflect.ValueOf(l.Prefix)
+		p["Print"] = reflect.ValueOf(l.Print)
+		p["Printf"] = reflect.ValueOf(l.Printf)
+		p["Println"] = reflect.ValueOf(l.Println)
+		p["SetFlags"] = reflect.ValueOf(l.SetFlags)
+		p["SetOutput"] = reflect.ValueOf(l.SetOutput)
+		p["SetPrefix"] = reflect.ValueOf(l.SetPrefix)
+		p["Writer"] = reflect.ValueOf(l.Writer)
+	}
+
+	if p = interp.binPkg["os"]; p != nil {
+		p["Stdin"] = reflect.ValueOf(&stdin).Elem()
+		p["Stdout"] = reflect.ValueOf(&stdout).Elem()
+		p["Stderr"] = reflect.ValueOf(&stderr).Elem()
 	}
 }
 
@@ -547,8 +697,10 @@ func ignoreScannerError(e *scanner.Error, s string) bool {
 }
 
 // REPL performs a Read-Eval-Print-Loop on input reader.
-// Results are printed on output writer.
-func (interp *Interpreter) REPL(in io.Reader, out io.Writer) {
+// Results are printed to the output writer of the Interpreter, provided as option
+// at creation time. Errors are printed to the similarly defined errors writer.
+// The last interpreter result value and error are returned.
+func (interp *Interpreter) REPL() (reflect.Value, error) {
 	// Preimport used bin packages, to avoid having to import these packages manually
 	// in REPL mode. These packages are already loaded anyway.
 	sc := interp.universe
@@ -562,66 +714,75 @@ func (interp *Interpreter) REPL(in io.Reader, out io.Writer) {
 		sc.sym[name] = &symbol{kind: pkgSym, typ: &itype{cat: binPkgT, path: k, scope: sc}}
 	}
 
+	in, out, errs := interp.stdin, interp.stdout, interp.stderr
 	ctx, cancel := context.WithCancel(context.Background())
-	end := make(chan struct{})     // channel to terminate signal handling goroutine
+	end := make(chan struct{})     // channel to terminate the REPL
 	sig := make(chan os.Signal, 1) // channel to trap interrupt signal (Ctrl-C)
+	lines := make(chan string)     // channel to read REPL input lines
 	prompt := getPrompt(in, out)   // prompt activated on tty like IO stream
 	s := bufio.NewScanner(in)      // read input stream line by line
 	var v reflect.Value            // result value from eval
 	var err error                  // error from eval
 	src := ""                      // source string to evaluate
+
 	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
 	prompt(v)
 
-	// Read, Eval, Print in a Loop.
-	for s.Scan() {
-		src += s.Text() + "\n"
+	go func() {
+		defer close(end)
+		for s.Scan() {
+			lines <- s.Text()
+		}
+		if e := s.Err(); e != nil {
+			fmt.Fprintln(errs, e)
+		}
+	}()
 
-		// The following goroutine handles interrupt signal by canceling eval.
-		go func() {
+	go func() {
+		for {
 			select {
 			case <-sig:
 				cancel()
+				lines <- ""
 			case <-end:
+				return
 			}
-		}()
+		}
+	}()
+
+	for {
+		var line string
+
+		select {
+		case <-end:
+			cancel()
+			return v, err
+		case line = <-lines:
+			src += line + "\n"
+		}
 
 		v, err = interp.EvalWithContext(ctx, src)
 		if err != nil {
 			switch e := err.(type) {
 			case scanner.ErrorList:
-				if len(e) == 0 || ignoreScannerError(e[0], s.Text()) {
+				if len(e) > 0 && ignoreScannerError(e[0], line) {
 					continue
 				}
-				fmt.Fprintln(out, e[0])
+				fmt.Fprintln(errs, strings.TrimPrefix(e[0].Error(), DefaultSourceName+":"))
 			case Panic:
-				fmt.Fprintln(out, e.Value)
-				fmt.Fprintln(out, string(e.Stack))
+				fmt.Fprintln(errs, e.Value)
+				fmt.Fprintln(errs, string(e.Stack))
 			default:
-				fmt.Fprintln(out, err)
+				fmt.Fprintln(errs, err)
 			}
 		}
-
 		if errors.Is(err, context.Canceled) {
-			// Eval has been interrupted by the above signal handling goroutine.
 			ctx, cancel = context.WithCancel(context.Background())
-		} else {
-			// No interrupt, release the above signal handling goroutine.
-			end <- struct{}{}
 		}
-
 		src = ""
 		prompt(v)
 	}
-	cancel() // Do not defer, as cancel func may change over time.
-	// TODO(mpl): log s.Err() if not nil?
-}
-
-// Repl performs a Read-Eval-Print-Loop on input file descriptor.
-// Results are printed on output.
-// Deprecated: use REPL instead.
-func (interp *Interpreter) Repl(in, out *os.File) {
-	interp.REPL(in, out)
 }
 
 // getPrompt returns a function which prints a prompt only if input is a terminal.
