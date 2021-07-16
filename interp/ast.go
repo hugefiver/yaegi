@@ -51,12 +51,14 @@ const (
 	fieldList
 	fileStmt
 	forStmt0     // for {}
-	forStmt1     // for cond {}
-	forStmt2     // for init; cond; {}
-	forStmt3     // for ; cond; post {}
-	forStmt3a    // for init; ; post {}
-	forStmt4     // for init; cond; post {}
-	forRangeStmt // for range
+	forStmt1     // for init; ; {}
+	forStmt2     // for cond {}
+	forStmt3     // for init; cond; {}
+	forStmt4     // for ; ; post {}
+	forStmt5     // for ; cond; post {}
+	forStmt6     // for init; ; post {}
+	forStmt7     // for init; cond; post {}
+	forRangeStmt // for range {}
 	funcDecl
 	funcLit
 	funcType
@@ -134,8 +136,10 @@ var kinds = [...]string{
 	forStmt1:          "forStmt1",
 	forStmt2:          "forStmt2",
 	forStmt3:          "forStmt3",
-	forStmt3a:         "forStmt3a",
 	forStmt4:          "forStmt4",
+	forStmt5:          "forStmt5",
+	forStmt6:          "forStmt6",
+	forStmt7:          "forStmt7",
 	forRangeStmt:      "forRangeStmt",
 	funcDecl:          "funcDecl",
 	funcType:          "funcType",
@@ -353,7 +357,7 @@ func ignoreError(err error, src string) bool {
 }
 
 func wrapInMain(src string) string {
-	return fmt.Sprintf("package main; func main() {%s}", src)
+	return fmt.Sprintf("package main; func main() {%s\n}", src)
 }
 
 // Note: no type analysis is performed at this stage, it is done in pre-order
@@ -654,23 +658,23 @@ func (interp *Interpreter) ast(src, name string, inc bool) (string, *node, error
 		case *ast.ForStmt:
 			// Disambiguate variants of FOR statements with a node kind per variant
 			var kind nkind
-			if a.Cond == nil {
-				if a.Init != nil && a.Post != nil {
-					kind = forStmt3a
-				} else {
-					kind = forStmt0
-				}
-			} else {
-				switch {
-				case a.Init == nil && a.Post == nil:
-					kind = forStmt1
-				case a.Init != nil && a.Post == nil:
-					kind = forStmt2
-				case a.Init == nil && a.Post != nil:
-					kind = forStmt3
-				default:
-					kind = forStmt4
-				}
+			switch {
+			case a.Cond == nil && a.Init == nil && a.Post == nil:
+				kind = forStmt0
+			case a.Cond == nil && a.Init != nil && a.Post == nil:
+				kind = forStmt1
+			case a.Cond != nil && a.Init == nil && a.Post == nil:
+				kind = forStmt2
+			case a.Cond != nil && a.Init != nil && a.Post == nil:
+				kind = forStmt3
+			case a.Cond == nil && a.Init == nil && a.Post != nil:
+				kind = forStmt4
+			case a.Cond != nil && a.Init == nil && a.Post != nil:
+				kind = forStmt5
+			case a.Cond == nil && a.Init != nil && a.Post != nil:
+				kind = forStmt6
+			case a.Cond != nil && a.Init != nil && a.Post != nil:
+				kind = forStmt7
 			}
 			st.push(addChild(&root, anc, pos, kind, aNop), nod)
 
@@ -712,7 +716,7 @@ func (interp *Interpreter) ast(src, name string, inc bool) (string, *node, error
 			n := addChild(&root, anc, pos, identExpr, aNop)
 			n.ident = a.Name
 			st.push(n, nod)
-			if n.anc.kind == defineStmt && n.anc.nright == 0 {
+			if n.anc.kind == defineStmt && n.anc.anc.kind == constDecl && n.anc.nright == 0 {
 				// Implicit assign expression (in a ConstDecl block).
 				// Clone assign source and type from previous
 				a := n.anc
@@ -854,7 +858,8 @@ func (interp *Interpreter) ast(src, name string, inc bool) (string, *node, error
 		case *ast.ValueSpec:
 			kind := valueSpec
 			act := aNop
-			if a.Values != nil {
+			switch {
+			case a.Values != nil:
 				if len(a.Names) > 1 && len(a.Values) == 1 {
 					if anc.node.kind == constDecl || anc.node.kind == varDecl {
 						kind = defineXStmt
@@ -870,7 +875,9 @@ func (interp *Interpreter) ast(src, name string, inc bool) (string, *node, error
 					}
 					act = aAssign
 				}
-			} else if anc.node.kind == constDecl {
+			case anc.node.kind == constDecl:
+				kind, act = defineStmt, aAssign
+			case anc.node.kind == varDecl && anc.node.anc.kind != fileStmt:
 				kind, act = defineStmt, aAssign
 			}
 			n := addChild(&root, anc, pos, kind, act)

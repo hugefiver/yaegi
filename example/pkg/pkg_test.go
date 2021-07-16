@@ -93,23 +93,32 @@ func TestPackages(t *testing.T) {
 			expected: "Yo hello",
 			evalFile: "./_pkg12/src/guthib.com/foo/main.go",
 		},
+		{
+			desc:     "eval main with vendor",
+			goPath:   "./_pkg13/",
+			expected: "foobar",
+			evalFile: "./_pkg13/src/guthib.com/foo/bar/main.go",
+		},
 	}
 
 	for _, test := range testCases {
 		test := test
 		t.Run(test.desc, func(t *testing.T) {
-			goPath, err := filepath.Abs(test.goPath)
+			goPath, err := filepath.Abs(filepath.FromSlash(test.goPath))
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			var stdout, stderr bytes.Buffer
 			i := interp.New(interp.Options{GoPath: goPath, Stdout: &stdout, Stderr: &stderr})
-			i.Use(stdlib.Symbols) // Use binary standard library
+			// Use binary standard library
+			if err := i.Use(stdlib.Symbols); err != nil {
+				t.Fatal(err)
+			}
 
 			var msg string
 			if test.evalFile != "" {
-				if _, err := i.EvalPath(test.evalFile); err != nil {
+				if _, err := i.EvalPath(filepath.FromSlash(test.evalFile)); err != nil {
 					fatalStderrf(t, "%v", err)
 				}
 				msg = stdout.String()
@@ -140,6 +149,8 @@ func TestPackages(t *testing.T) {
 }
 
 func fatalStderrf(t *testing.T, format string, args ...interface{}) {
+	t.Helper()
+
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	t.FailNow()
 }
@@ -153,7 +164,7 @@ func TestPackagesError(t *testing.T) {
 		{
 			desc:     "different packages in the same directory",
 			goPath:   "./_pkg9/",
-			expected: "1:21: import \"github.com/foo/pkg\" error: found packages pkg and pkgfalse in _pkg9/src/github.com/foo/pkg",
+			expected: `1:21: import "github.com/foo/pkg" error: found packages pkg and pkgfalse in ` + filepath.FromSlash("_pkg9/src/github.com/foo/pkg"),
 		},
 	}
 
@@ -162,7 +173,10 @@ func TestPackagesError(t *testing.T) {
 		t.Run(test.desc, func(t *testing.T) {
 			// Init go interpreter
 			i := interp.New(interp.Options{GoPath: test.goPath})
-			i.Use(stdlib.Symbols) // Use binary standard library
+			// Use binary standard library
+			if err := i.Use(stdlib.Symbols); err != nil {
+				t.Fatal(err)
+			}
 
 			// Load pkg from sources
 			_, err := i.Eval(`import "github.com/foo/pkg"`)

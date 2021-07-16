@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"go/build"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,21 +21,23 @@ import (
 
 func test(arg []string) (err error) {
 	var (
-		bench           string
-		benchmem        bool
-		benchtime       string
-		count           string
-		cpu             string
-		failfast        bool
-		run             string
-		short           bool
-		tags            string
-		useUnrestricted bool
-		useUnsafe       bool
-		useSyscall      bool
-		timeout         string
-		verbose         bool
+		bench     string
+		benchmem  bool
+		benchtime string
+		count     string
+		cpu       string
+		failfast  bool
+		run       string
+		short     bool
+		tags      string
+		timeout   string
+		verbose   bool
 	)
+
+	// The following flags are initialized from environment.
+	useSyscall, _ := strconv.ParseBool(os.Getenv("YAEGI_SYSCALL"))
+	useUnrestricted, _ := strconv.ParseBool(os.Getenv("YAEGI_UNRESTRICTED"))
+	useUnsafe, _ := strconv.ParseBool(os.Getenv("YAEGI_UNSAFE"))
 
 	tflag := flag.NewFlagSet("test", flag.ContinueOnError)
 	tflag.StringVar(&bench, "bench", "", "Run only those benchmarks matching a regular expression.")
@@ -45,9 +50,9 @@ func test(arg []string) (err error) {
 	tflag.BoolVar(&short, "short", false, "Tell long-running tests to shorten their run time.")
 	tflag.StringVar(&tags, "tags", "", "Set a list of build tags.")
 	tflag.StringVar(&timeout, "timeout", "", "If a test binary runs longer than duration d, panic.")
-	tflag.BoolVar(&useUnrestricted, "unrestricted", false, "Include unrestricted symbols.")
-	tflag.BoolVar(&useUnsafe, "unsafe", false, "Include usafe symbols.")
-	tflag.BoolVar(&useSyscall, "syscall", false, "Include syscall symbols.")
+	tflag.BoolVar(&useUnrestricted, "unrestricted", useUnrestricted, "Include unrestricted symbols.")
+	tflag.BoolVar(&useUnsafe, "unsafe", useUnsafe, "Include usafe symbols.")
+	tflag.BoolVar(&useSyscall, "syscall", useSyscall, "Include syscall symbols.")
 	tflag.BoolVar(&verbose, "v", false, "Verbose output: log all tests as they are run.")
 	tflag.Usage = func() {
 		fmt.Println("Usage: yaegi test [options] [path]")
@@ -98,18 +103,50 @@ func test(arg []string) (err error) {
 	testing.Init()
 	os.Args = tf
 	flag.Parse()
+	path += string(filepath.Separator)
+	var dir string
+
+	switch strings.Split(path, string(filepath.Separator))[0] {
+	case ".", "..", string(filepath.Separator):
+		dir = path
+	default:
+		dir = filepath.Join(build.Default.GOPATH, "src", path)
+	}
+	if err = os.Chdir(dir); err != nil {
+		return err
+	}
 
 	i := interp.New(interp.Options{GoPath: build.Default.GOPATH, BuildTags: strings.Split(tags, ",")})
-	i.Use(stdlib.Symbols)
-	i.Use(interp.Symbols)
+	if err := i.Use(stdlib.Symbols); err != nil {
+		return err
+	}
+	if err := i.Use(interp.Symbols); err != nil {
+		return err
+	}
 	if useSyscall {
-		i.Use(syscall.Symbols)
+		if err := i.Use(syscall.Symbols); err != nil {
+			return err
+		}
+		// Using a environment var allows a nested interpreter to import the syscall package.
+		if err := os.Setenv("YAEGI_SYSCALL", "1"); err != nil {
+			return err
+		}
 	}
 	if useUnrestricted {
-		i.Use(unrestricted.Symbols)
+		if err := i.Use(unrestricted.Symbols); err != nil {
+			return err
+		}
+		if err := os.Setenv("YAEGI_UNRESTRICTED", "1"); err != nil {
+			return err
+		}
 	}
 	if useUnsafe {
-		i.Use(unsafe.Symbols)
+		if err := i.Use(unsafe.Symbols); err != nil {
+			return err
+		}
+		if err := os.Setenv("YAEGI_UNSAFE", "1"); err != nil {
+			return err
+		}
 	}
 	if err = i.EvalTest(path); err != nil {
 		return err
@@ -117,7 +154,11 @@ func test(arg []string) (err error) {
 
 	benchmarks := []testing.InternalBenchmark{}
 	tests := []testing.InternalTest{}
-	for name, sym := range i.Symbols(path) {
+	syms, ok := i.Symbols(path)[path]
+	if !ok {
+		return errors.New("No tests found")
+	}
+	for name, sym := range syms {
 		switch fun := sym.Interface().(type) {
 		case func(*testing.B):
 			benchmarks = append(benchmarks, testing.InternalBenchmark{name, fun})

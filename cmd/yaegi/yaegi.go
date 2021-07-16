@@ -71,7 +71,16 @@ Options:
 	-unsafe
 	  include unsafe symbols.
 
-Debugging support (may be removed at any time):
+Environment variables:
+  YAEGI_SYSCALL=1
+    Include syscall symbols (same as -syscall flag).
+  YAEGI_UNRESTRICTED=1
+    Include unrestricted symbols (same as -unrestricted flag).
+  YAEGI_UNSAFE=1
+    Include unsafe symbols (same as -unsafe flag).
+  YAEGI_PROMPT=1
+    Force enable the printing of the REPL prompt and the result of last instruction,
+    even if stdin is not a terminal.
   YAEGI_AST_DOT=1
     Generate and display graphviz dot of AST with dotty(1)
   YAEGI_CFG_DOT=1
@@ -90,6 +99,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"github.com/traefik/yaegi/interp"
 )
 
 const (
@@ -97,7 +108,10 @@ const (
 	Help    = "help"
 	Run     = "run"
 	Test    = "test"
+	Version = "version"
 )
+
+var version = "devel" // This may be overwritten at build time.
 
 func main() {
 	var cmd string
@@ -119,6 +133,8 @@ func main() {
 		err = run(os.Args[2:])
 	case Test:
 		err = test(os.Args[2:])
+	case Version:
+		fmt.Println(version)
 	default:
 		// If no command is given, fallback to default "run" command.
 		// This allows scripts starting with "#!/usr/bin/env yaegi",
@@ -129,8 +145,10 @@ func main() {
 	}
 
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
-		err = fmt.Errorf("%s: %w", cmd, err)
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, fmt.Errorf("%s: %w", cmd, err))
+		if p, ok := err.(interp.Panic); ok {
+			fmt.Fprintln(os.Stderr, string(p.Stack))
+		}
 		exitCode = 1
 	}
 	os.Exit(exitCode)

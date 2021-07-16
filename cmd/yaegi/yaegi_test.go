@@ -50,9 +50,9 @@ func TestYaegiCmdCancel(t *testing.T) {
 
 	yaegi := filepath.Join(tmp, "yaegi")
 	build := exec.Command("go", "build", "-race", "-o", yaegi, ".")
-	err = build.Run()
+	out, err := build.CombinedOutput()
 	if err != nil {
-		t.Fatalf("failed to build yaegi command: %v", err)
+		t.Fatalf("failed to build yaegi command: %v: %s", err, out)
 	}
 
 	// Test src must be terminated by a single newline.
@@ -82,7 +82,7 @@ func TestYaegiCmdCancel(t *testing.T) {
 		if err != nil {
 			t.Errorf("failed pipe test source to yaegi command: %v", err)
 		}
-		Sleep(200 * time.Millisecond)
+		Sleep(500 * time.Millisecond)
 		err = cmd.Process.Signal(os.Interrupt)
 		if err != nil {
 			t.Errorf("failed to send os.Interrupt to yaegi command: %v", err)
